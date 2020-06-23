@@ -30,7 +30,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #define TEXPREF_LINEAR			0x0002	// force linear
 #define TEXPREF_NEAREST			0x0004	// force nearest
 #define TEXPREF_ALPHA			0x0008	// allow alpha
-#define TEXPREF_PAD			0x0010	// allow padding
+#define TEXPREF_PAD				0x0010	// allow padding
 #define TEXPREF_PERSIST			0x0020	// never free
 #define TEXPREF_OVERWRITE		0x0040	// overwrite existing same-name texture
 #define TEXPREF_NOPICMIP		0x0080	// always load full-sized
@@ -40,6 +40,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #define TEXPREF_WARPIMAGE		0x0800	// resize this texture when warpimagesize changes
 #define TEXPREF_PREMULTIPLY		0x1000	// rgb = rgb*a; a=a;
 
+#if defined(WIN32) || defined(WIN64)
+#define strcasecmp _stricmp
+#define strncasecmp _stricmp
+#endif /* Def WIN32 or Def WIN64 */
+
 enum srcformat {SRC_INDEXED, SRC_LIGHTMAP, SRC_RGBA, SRC_EXTERNAL, SRC_FIRSTCOMPRESSED};
 extern qboolean gl_texture_s3tc, gl_texture_rgtc, gl_texture_bptc, gl_texture_etc2, gl_texture_astc;
 
@@ -47,15 +52,15 @@ typedef uintptr_t src_offset_t;
 
 typedef struct gltexture_s {
 //managed by texture manager
-	GLuint			texnum;
+	GLuint				texnum;
 	struct gltexture_s	*next;
-	qmodel_t		*owner;
+	qmodel_t			*owner;
 //managed by image loading
-	char			name[64];
+	char				name[64];
 	unsigned int		width; //size of image as it exists in opengl
 	unsigned int		height; //size of image as it exists in opengl
 	unsigned int		flags;
-	char			source_file[MAX_QPATH]; //relative filepath to data source, or "" if source is in memory
+	char				source_file[MAX_QPATH]; //relative filepath to data source, or "" if source is in memory
 	src_offset_t		source_offset; //byte offset into file, or memory address
 	enum srcformat		source_format; //format of pixel data (indexed, lightmap, or rgba)
 	unsigned int		source_width; //size of image in source data
@@ -64,7 +69,7 @@ typedef struct gltexture_s {
 	signed char			shirt; //0-13 shirt color, or -1 if never colormapped
 	signed char			pants; //0-13 pants color, or -1 if never colormapped
 //used for rendering
-	int			visframe; //matches r_framecount if texture was bound this frame
+	int					visframe; //matches r_framecount if texture was bound this frame
 } gltexture_t;
 
 extern gltexture_t *notexture;

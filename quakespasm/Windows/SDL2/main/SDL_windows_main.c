@@ -3,6 +3,10 @@
 
     The WinMain function -- calls your program's main() function
 */
+
+#ifdef USE_SDL2
+
+
 #include "SDL_config.h"
 
 #ifdef __WIN32__
@@ -106,3 +110,5 @@ WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw)
 #endif /* __WIN32__ */
 
 /* vi: set ts=4 sw=4 expandtab: */
+
+#endif

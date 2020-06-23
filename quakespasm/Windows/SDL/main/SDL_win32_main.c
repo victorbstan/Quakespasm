@@ -4,6 +4,10 @@
     The WinMain function -- calls your program's main() function
 */
 
+#ifdef USE_SDL2
+	// See SDL_windows_main.c
+#else
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -400,3 +404,5 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw)
 	/* Hush little compiler, don't you cry... */
 	return 0;
 }
+
+#endif

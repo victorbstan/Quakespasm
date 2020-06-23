@@ -24,6 +24,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 
+#ifdef _MSC_VER
+#include "glext.h"
+#endif
+
 const int	gl_solid_format = 3;
 const int	gl_alpha_format = 4;
 
@@ -33,7 +37,6 @@ static cvar_t	gl_max_size = {"gl_max_size", "0", CVAR_NONE};
 static cvar_t	gl_picmip = {"gl_picmip", "0", CVAR_NONE};
 static GLint	gl_hardware_maxsize;
 
-#define	MAX_GLTEXTURES	2048
 static int numgltextures;
 static gltexture_t	*active_gltextures, *free_gltextures;
 gltexture_t		*notexture, *nulltexture;
@@ -111,15 +114,22 @@ typedef struct
 {
 	int	magfilter;
 	int	minfilter;
-	const char  *name;
+	const char  *name2, *name1;
 } glmode_t;
 static glmode_t glmodes[] = {
-	{GL_NEAREST, GL_NEAREST,		"GL_NEAREST"},
-	{GL_NEAREST, GL_NEAREST_MIPMAP_NEAREST,	"GL_NEAREST_MIPMAP_NEAREST"},
-	{GL_NEAREST, GL_NEAREST_MIPMAP_LINEAR,	"GL_NEAREST_MIPMAP_LINEAR"},
-	{GL_LINEAR,  GL_LINEAR,			"GL_LINEAR"},
-	{GL_LINEAR,  GL_LINEAR_MIPMAP_NEAREST,	"GL_LINEAR_MIPMAP_NEAREST"},
-	{GL_LINEAR,  GL_LINEAR_MIPMAP_LINEAR,	"GL_LINEAR_MIPMAP_LINEAR"},
+	{GL_NEAREST, GL_NEAREST,				"n.n", "GL_NEAREST"},
+	{GL_NEAREST, GL_NEAREST_MIPMAP_NEAREST,	"nnn", "GL_NEAREST_MIPMAP_NEAREST"},
+	{GL_NEAREST, GL_NEAREST_MIPMAP_LINEAR,	"nln", "GL_NEAREST_MIPMAP_LINEAR"},
+	{GL_LINEAR,  GL_LINEAR,					"l.l", "GL_LINEAR"},
+	{GL_LINEAR,  GL_LINEAR_MIPMAP_NEAREST,	"lnl", "GL_LINEAR_MIPMAP_NEAREST"},
+	{GL_LINEAR,  GL_LINEAR_MIPMAP_LINEAR,	"lll", "GL_LINEAR_MIPMAP_LINEAR"},
+
+	{GL_NEAREST, GL_LINEAR,					"n.l", NULL},
+	{GL_NEAREST,  GL_LINEAR_MIPMAP_NEAREST,	"nnl", NULL},
+	{GL_NEAREST,  GL_LINEAR_MIPMAP_LINEAR,	"nll", NULL},
+	{GL_LINEAR,  GL_NEAREST,				"l.n", NULL},
+	{GL_LINEAR,  GL_NEAREST_MIPMAP_NEAREST,	"lnn", NULL},
+	{GL_LINEAR,  GL_NEAREST_MIPMAP_LINEAR,	"lln", NULL},
 };
 #define NUM_GLMODES (int)(sizeof(glmodes)/sizeof(glmodes[0]))
 static int glmode_idx = NUM_GLMODES - 1; /* trilinear */
@@ -134,7 +144,7 @@ static void TexMgr_DescribeTextureModes_f (void)
 	int i;
 
 	for (i = 0; i < NUM_GLMODES; i++)
-		Con_SafePrintf ("   %2i: %s\n", i + 1, glmodes[i].name);
+		Con_SafePrintf ("   %2i: %s\n", i + 1, glmodes[i].name1?glmodes[i].name1:glmodes[i].name2);
 
 	Con_Printf ("%i modes\n", i);
 }
@@ -183,7 +193,8 @@ static void TexMgr_TextureMode_f (cvar_t *var)
 
 	for (i = 0; i < NUM_GLMODES; i++)
 	{
-		if (!Q_strcmp (glmodes[i].name, gl_texturemode.string))
+		if ((glmodes[i].name1&&!Q_strcmp (glmodes[i].name1, gl_texturemode.string)) ||
+			(glmodes[i].name2&&!Q_strcmp (glmodes[i].name2, gl_texturemode.string)))
 		{
 			if (glmode_idx != i)
 			{
@@ -199,9 +210,10 @@ static void TexMgr_TextureMode_f (cvar_t *var)
 
 	for (i = 0; i < NUM_GLMODES; i++)
 	{
-		if (!q_strcasecmp (glmodes[i].name, gl_texturemode.string))
+		if ((glmodes[i].name1&&!q_strcasecmp (glmodes[i].name1, gl_texturemode.string)) ||
+			(glmodes[i].name2&&!q_strcasecmp (glmodes[i].name2, gl_texturemode.string)))
 		{
-			Cvar_SetQuick (&gl_texturemode, glmodes[i].name);
+			Cvar_SetQuick (&gl_texturemode, glmodes[i].name1?glmodes[i].name1:glmodes[i].name2);
 			return;
 		}
 	}
@@ -209,12 +221,12 @@ static void TexMgr_TextureMode_f (cvar_t *var)
 	i = atoi(gl_texturemode.string);
 	if (i >= 1 && i <= NUM_GLMODES)
 	{
-		Cvar_SetQuick (&gl_texturemode, glmodes[i-1].name);
+		Cvar_SetQuick (&gl_texturemode, glmodes[i-1].name1);
 		return;
 	}
 
 	Con_Printf ("\"%s\" is not a valid texturemode\n", gl_texturemode.string);
-	Cvar_SetQuick (&gl_texturemode, glmodes[glmode_idx].name);
+	Cvar_SetQuick (&gl_texturemode, glmodes[glmode_idx].name1?glmodes[glmode_idx].name1:glmodes[glmode_idx].name2);
 }
 
 /*
@@ -382,8 +394,14 @@ gltexture_t *TexMgr_NewTexture (void)
 {
 	gltexture_t *glt;
 
-	if (numgltextures == MAX_GLTEXTURES)
-		Sys_Error("numgltextures == MAX_GLTEXTURES\n");
+	if (!free_gltextures)
+	{
+		int i, newtexturecount = 64;
+		free_gltextures = (gltexture_t *) malloc (newtexturecount * sizeof(gltexture_t));
+		for (i = 0; i < newtexturecount - 1; i++)
+			free_gltextures[i].next = &free_gltextures[i+1];
+		free_gltextures[i].next = NULL;
+	}
 
 	glt = free_gltextures;
 	free_gltextures = glt->next;
@@ -660,9 +678,10 @@ void TexMgr_Init (void)
 	extern texture_t *r_notexture_mip, *r_notexture_mip2;
 
 	// init texture list
-	free_gltextures = (gltexture_t *) Hunk_AllocName (MAX_GLTEXTURES * sizeof(gltexture_t), "gltextures");
+	int initialtexturecount = 256;
+	free_gltextures = (gltexture_t *) Hunk_AllocName (initialtexturecount * sizeof(gltexture_t), "gltextures");
 	active_gltextures = NULL;
-	for (i = 0; i < MAX_GLTEXTURES - 1; i++)
+	for (i = 0; i < initialtexturecount - 1; i++)
 		free_gltextures[i].next = &free_gltextures[i+1];
 	free_gltextures[i].next = NULL;
 	numgltextures = 0;
@@ -674,7 +693,7 @@ void TexMgr_Init (void)
 	Cvar_RegisterVariable (&gl_picmip);
 	Cvar_RegisterVariable (&gl_texture_anisotropy);
 	Cvar_SetCallback (&gl_texture_anisotropy, &TexMgr_Anisotropy_f);
-	gl_texturemode.string = glmodes[glmode_idx].name;
+	gl_texturemode.string = glmodes[glmode_idx].name2?glmodes[glmode_idx].name2:glmodes[glmode_idx].name1;
 	Cvar_RegisterVariable (&gl_texturemode);
 	Cvar_SetCallback (&gl_texturemode, &TexMgr_TextureMode_f);
 	Cmd_AddCommand ("gl_describetexturemodes", &TexMgr_DescribeTextureModes_f);
@@ -1464,6 +1483,10 @@ gltexture_t *TexMgr_LoadImage (qmodel_t *owner, const char *name, int width, int
 			glt->width = glt->source_width;
 			glt->height = glt->source_height;
 			TexMgr_LoadImage8 (glt, (byte*)"\x07");
+
+			glt->source_width = glt->source_height = 0;
+			glt->width = glt->source_width;
+			glt->height = glt->source_height;
 		}
 		else
 		{

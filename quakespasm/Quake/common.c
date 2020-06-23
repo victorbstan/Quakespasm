@@ -25,6 +25,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "quakedef.h"
 #include "q_ctype.h"
 #include <errno.h>
+#include <sys/stat.h>
 
 #ifndef _WIN32
 	#include <dirent.h>
@@ -554,6 +555,93 @@ float Q_atof (const char *str)
 	}
 
 	return val*sign;
+}
+
+// Q_ftoa: convert IEEE 754 float to a base-10 string with "infinite" decimal places
+void Q_ftoa(char *str, float in)
+{
+	struct {
+		float f;
+		unsigned int i;
+	} u = {in};
+
+	int signbit = (u.i & 0x80000000) >> 31;
+	int exp = (signed int)((u.i & 0x7F800000) >> 23) - 127;
+	int mantissa = (u.i & 0x007FFFFF);
+
+	if (exp == 128) // 255(NaN/Infinity bits) - 127(bias)
+	{
+		if (signbit)
+		{
+			*str = '-';
+			str++;
+		}
+		if (mantissa == 0) // infinity
+			strcpy(str, "1.#INF");
+		else // NaN or indeterminate
+			strcpy(str, "1.#NAN");
+		return;
+	}
+
+	exp = -exp;
+	exp = (int)(exp * 0.30102999957f); // convert base 2 to base 10
+	exp += 8;
+
+	if (exp <= 0)
+		sprintf(str, "%.0f", in);
+	else
+	{
+		char tstr[32];
+		char *lsig = str - 1;
+		sprintf(tstr, "%%.%if", exp);
+		sprintf(str, tstr, in);
+		// find last significant digit and trim
+		while (*str)
+		{
+			if (*str >= '1' && *str <= '9')
+				lsig = str;
+			else if (*str == '.')
+				lsig = str - 1;
+			str++;
+		}
+		lsig[1] = '\0';
+	}
+}
+
+int wildcmp(const char *wild, const char *string)
+{	//case-insensitive string compare with wildcards. returns true for a match.
+	while (*string)
+	{
+		if (*wild == '*')
+		{
+			if (*string == '/' || *string == '\\')
+			{
+				//* terminates if we get a match on the char following it, or if its a \ or / char
+				wild++;
+				continue;
+			}
+			if (wildcmp(wild+1, string))
+				return true;
+			string++;
+		}
+		else if ((q_tolower(*wild) == q_tolower(*string)) || (*wild == '?'))
+		{
+			//this char matches
+			wild++;
+			string++;
+		}
+		else
+		{
+			//failure
+			return false;
+		}
+	}
+
+	while (*wild == '*')
+	{
+		wild++;
+	}
+	return !*wild;
 }
 
 /*
@@ -1626,7 +1714,7 @@ typedef struct
 	int		dirlen;
 } dpackheader_t;
 
-#define MAX_FILES_IN_PACK	2048
+#define MAX_FILES_IN_PACK	4096
 
 char	com_gamenames[1024];	//eg: "hipnotic;quoth;warp", no id1, no private stuff
 char	com_gamedir[MAX_OSPATH];
@@ -1847,6 +1935,7 @@ static int COM_FindFile (const char *filename, int *handle, FILE **file,
 		&& strcmp(ext, "png") != 0
 		&& strcmp(ext, "jpg") != 0
 		&& strcmp(ext, "jpeg") != 0
+		&& strcmp(ext, "dds") != 0
 		&& strcmp(ext, "lit") != 0
 		&& strcmp(ext, "ent") != 0)
 		Con_DPrintf ("FindFile: can't find %s\n", filename);
@@ -2215,7 +2304,7 @@ void COM_ListSystemFiles(void *ctx, const char *gamedir, const char *ext, qboole
 #endif
 }
 
-void COM_ListFiles(void *ctx, const char *gamedir, const char *pattern, qboolean (*cb)(void *ctx, const char *fname, time_t mtime, size_t fsize))
+static void COM_ListFiles(void *ctx, searchpath_t *spath, const char *pattern, qboolean (*cb)(void *ctx, const char *fname, time_t mtime, size_t fsize, searchpath_t *spath))
 {
 	char prefixdir[MAX_OSPATH];
 	char *sl;
@@ -2237,14 +2326,14 @@ void COM_ListFiles(void *ctx, const char *gamedir, const char *pattern, qboolean
 		char filestring[MAX_OSPATH];
 		WIN32_FIND_DATA	fdat;
 		HANDLE		fhnd;
-		q_snprintf (filestring, sizeof(filestring), "%s/%s%s", gamedir, prefixdir, pattern);
+		q_snprintf (filestring, sizeof(filestring), "%s/%s%s", spath->filename, prefixdir, pattern);
 		fhnd = FindFirstFile(filestring, &fdat);
 		if (fhnd == INVALID_HANDLE_VALUE)
 			return;
 		do
 		{
 			q_snprintf (filestring, sizeof(filestring), "%s%s", prefixdir, fdat.cFileName);
-			cb (ctx, filestring, Sys_FileTimeToTime(fdat.ftLastWriteTime), fdat.nFileSizeLow);
+			cb (ctx, filestring, Sys_FileTimeToTime(fdat.ftLastWriteTime), fdat.nFileSizeLow, spath);
 		} while (FindNextFile(fhnd, &fdat));
 		FindClose(fhnd);
 	}
@@ -2254,21 +2343,59 @@ void COM_ListFiles(void *ctx, const char *gamedir, const char *pattern, qboolean
 		DIR		*dir_p;
 		struct dirent	*dir_t;
 
-		q_snprintf (filestring, sizeof(filestring), "%s/%s%s", gamedir, prefixdir, pattern);
+		q_snprintf (filestring, sizeof(filestring), "%s/%s", spath->filename, prefixdir);
 		dir_p = opendir(filestring);
 		if (dir_p == NULL)
 			return;
 		while ((dir_t = readdir(dir_p)) != NULL)
 		{
+			if (*dir_t->d_name == '.')	//ignore hidden paths... and parent etc weirdness.
+				continue;
 			if (!fnmatch(pattern, dir_t->d_name, FNM_NOESCAPE|FNM_PATHNAME|FNM_CASEFOLD))
 			{
+				struct stat s;
+				q_snprintf (filestring, sizeof(filestring), "%s/%s%s", spath->filename, prefixdir, dir_t->d_name);
+				if (stat(filestring, &s) < 0)
+					memset(&s, 0, sizeof(s));
+
 				q_snprintf (filestring, sizeof(filestring), "%s%s", prefixdir, dir_t->d_name);
-				cb (ctx, filestring, 0, 0);
+				cb (ctx, filestring, s.st_mtime, s.st_size, spath);
 			}
 		}
 		closedir(dir_p);
 	}
 #endif
+}
+void COM_ListAllFiles(void *ctx, const char *pattern, qboolean (*cb)(void *ctx, const char *fname, time_t mtime, size_t fsize, searchpath_t *spath))
+{
+	searchpath_t *search;
+
+	if (*pattern == '/' || strchr(pattern, ':')	//block absolute paths
+		|| strchr(pattern, '\\')	//block unportable paths (also ones that mess up other checks)
+		|| strstr(pattern, "./"))	//block evil relative paths (any kind)
+	{
+		Con_Printf("Blocking absolute/non-portable/dodgy search pattern: %s\n", pattern);
+		return;
+	}
+
+	//don't add the same pak twice.
+	for (search = com_searchpaths; search; search = search->next)
+	{
+		if (search->pack)
+		{
+			pack_t *pak = search->pack;
+			int i;
+			for (i = 0; i < pak->numfiles; i++)
+			{
+				if (wildcmp(pattern, pak->files[i].name))
+					cb(ctx, pak->files[i].name, pak->mtime, pak->files[i].filelen, search);
+			}
+		}
+		else
+		{
+			COM_ListFiles(ctx, search, pattern, cb);
+		}
+	}
 }
 
 static qboolean COM_AddPackage(searchpath_t *basepath, const char *pakfile)
@@ -2298,6 +2425,12 @@ static qboolean COM_AddPackage(searchpath_t *basepath, const char *pakfile)
 
 	if (!pak)
 		return false;
+
+	{
+		struct stat s;
+		if (stat(pakfile, &s) >= 0)
+			pak->mtime = s.st_mtime;
+	}
 
 	search = (searchpath_t *) Z_Malloc(sizeof(searchpath_t));
 	search->path_id = basepath->path_id;
@@ -2664,8 +2797,29 @@ void COM_InitFilesystem (void) //johnfitz -- modified based on topaz's tutorial
 	if ((com_basedir[j-1] == '\\') || (com_basedir[j-1] == '/'))
 		com_basedir[j-1] = 0;
 
-	// start up with GAMENAME by default (id1)
-	COM_AddGameDirectory (GAMENAME);
+	i = COM_CheckParmNext (i, "-basegame");
+	if (i)
+	{	//-basegame:
+		// a) replaces all hardcoded dirs (read: alternative to id1)
+		// b) isn't flushed on normal gamedir switches (like id1).
+		com_modified = true; //shouldn't be relevant when not using id content... but we don't really know.
+		for(;; i = COM_CheckParmNext (i, "-basegame"))
+		{
+			if (!i || i >= com_argc-1)
+				break;
+
+			p = com_argv[i + 1];
+			if (!*p || !strcmp(p, ".") || strstr(p, "..") || *p=='/' || *p=='\\' || strstr(p, ":"))
+				Sys_Error ("gamedir should be a single directory name, not a path\n");
+			if (p != NULL)
+				COM_AddGameDirectory (p);
+		}
+	}
+	else
+	{
+		// start up with GAMENAME by default (id1)
+		COM_AddGameDirectory (GAMENAME);
+	}
 
 	/* this is the end of our base searchpath:
 	 * any set gamedirs, such as those from -game command line

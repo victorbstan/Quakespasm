@@ -80,6 +80,7 @@ cvar_t	pausable = {"pausable","1",CVAR_NONE};
 
 cvar_t	developer = {"developer","0",CVAR_NONE};
 
+static cvar_t	pr_engine = {"pr_engine", ENGINE_NAME_AND_VER, CVAR_NONE};
 cvar_t	temp1 = {"temp1","0",CVAR_NONE};
 
 cvar_t devstats = {"devstats","0",CVAR_NONE}; //johnfitz -- track developer statistics that vary every frame
@@ -173,6 +174,8 @@ void Host_Error (const char *error, ...)
 
 	if (cl.qcvm.progs)
 		glDisable(GL_SCISSOR_TEST);	//equivelent to drawresetcliparea, to reset any damage if we crashed in csqc.
+	if (qcvm == &cls.menu_qcvm)
+		MQC_Shutdown();
 	PR_SwitchQCVM(NULL);
 
 	SCR_EndLoadingPlaque ();		// reenable screen updates
@@ -281,6 +284,7 @@ void Host_InitLocal (void)
 
 	Host_InitCommands ();
 
+	Cvar_RegisterVariable (&pr_engine);
 	Cvar_RegisterVariable (&host_framerate);
 	Cvar_RegisterVariable (&host_speeds);
 	Cvar_RegisterVariable (&host_maxfps); //johnfitz
@@ -767,8 +771,8 @@ void _Host_Frame (double time)
 				PR_SwitchQCVM(&cl.qcvm);
 				//try csprogs.dat first, then fall back on progs.dat in case someone tried merging the two.
 				//we only care about it if it actually contains a CSQC_DrawHud, otherwise its either just a (misnamed) ssqc progs or a full csqc progs that would just crash us on 3d stuff.
-				if ((PR_LoadProgs("csprogs.dat", false, pr_csqcbuiltins, pr_csqcnumbuiltins) && qcvm->extfuncs.CSQC_DrawHud)|| 
-					(PR_LoadProgs("progs.dat",   false, pr_csqcbuiltins, pr_csqcnumbuiltins) && qcvm->extfuncs.CSQC_DrawHud))
+				if ((PR_LoadProgs("csprogs.dat", false, PROGHEADER_CRC, pr_csqcbuiltins, pr_csqcnumbuiltins) && qcvm->extfuncs.CSQC_DrawHud)||
+					(PR_LoadProgs("progs.dat",   false, PROGHEADER_CRC, pr_csqcbuiltins, pr_csqcnumbuiltins) && qcvm->extfuncs.CSQC_DrawHud))
 				{
 					qcvm->max_edicts = CLAMP (MIN_EDICTS,(int)max_edicts.value,MAX_EDICTS);
 					qcvm->edicts = (edict_t *) malloc (qcvm->max_edicts*qcvm->edict_size);
@@ -970,7 +974,6 @@ void Host_Init (void)
 
 		V_Init ();
 		Chase_Init ();
-		M_Init ();
 		ExtraMaps_Init (); //johnfitz
 		Modlist_Init (); //johnfitz
 		DemoList_Init (); //ericw
@@ -992,6 +995,16 @@ void Host_Init (void)
 
 	host_initialized = true;
 	Con_Printf ("\n========= Quake Initialized =========\n\n");
+
+
+	//okay... now we can do stuff that's allowed to Host_Error
+	if (setjmp (host_abortserver) )
+		return;			// something bad happened
+	if (cls.state != ca_dedicated)
+		M_Init ();
+	if (setjmp (host_abortserver) )
+		return;			// don't do the above twice if the following Cbuf_Execute does bad things.
+
 
 	//spike -- create these aliases, because they're useful.
 	Cbuf_AddText ("alias startmap_sp \"map start\"\n");

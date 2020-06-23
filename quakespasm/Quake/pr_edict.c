@@ -35,7 +35,6 @@ int		type_size[8] = {
 };
 
 static ddef_t	*ED_FieldAtOfs (int ofs);
-qboolean	ED_ParseEpair (void *base, ddef_t *key, const char *s);
 
 cvar_t	nomonsters = {"nomonsters", "0", CVAR_NONE};
 cvar_t	gamecfg = {"gamecfg", "0", CVAR_NONE};
@@ -575,7 +574,7 @@ static void ED_PrintEdict_f (void)
 			else if (Cmd_Argc() < 4)
 				Con_Printf("Edict %u.%s==%s\n", i, PR_GetString(def->s_name), PR_UglyValueString(def->type&~DEF_SAVEGLOBAL, (eval_t *)((char *)&EDICT_NUM(i)->v + def->ofs*4)));
 			else
-				ED_ParseEpair((void *)&EDICT_NUM(i)->v, def, Cmd_Argv(3));
+				ED_ParseEpair((void *)&EDICT_NUM(i)->v, def, Cmd_Argv(3), false);
 		}
 
 	}
@@ -698,7 +697,7 @@ const char *ED_ParseGlobals (const char *data)
 			continue;
 		}
 
-		if (!ED_ParseEpair ((void *)qcvm->globals, key, com_token))
+		if (!ED_ParseEpair ((void *)qcvm->globals, key, com_token, false))
 			Host_Error ("ED_ParseGlobals: parse error");
 	}
 	return data;
@@ -737,7 +736,37 @@ static string_t ED_NewString (const char *string)
 
 	return num;
 }
+static void ED_RezoneString (string_t *ref, const char *str)
+{
+	char *buf;
+	size_t len = strlen(str)+1;
+	size_t id;
 
+	if (*ref)
+	{	//if the reference is already a zoned string then free it first.
+		id = -1-*ref;
+		if (id < qcvm->knownzonesize && (qcvm->knownzone[id>>3] & (1u<<(id&7))))
+		{	//okay, it was zoned.
+			qcvm->knownzone[id>>3] &= ~(1u<<(id&7));
+			buf = (char*)PR_GetString(*ref);
+			PR_ClearEngineString(*ref);
+			Z_Free(buf);
+		}
+//		else
+//			Con_Warning("ED_RezoneString: string wasn't strzoned\n");	//warnings would trigger from the default cvar value that autocvars are initialised with
+	}
+
+	buf = Z_Malloc(len);
+	memcpy(buf, str, len);
+	id = -1-(*ref = PR_SetEngineString(buf));
+	//make sure its flagged as zoned so we can clean up properly after.
+	if (id >= qcvm->knownzonesize)
+	{
+		qcvm->knownzonesize = (id+32)&~7;
+		qcvm->knownzone = Z_Realloc(qcvm->knownzone, (qcvm->knownzonesize+7)>>3);
+	}
+	qcvm->knownzone[id>>3] |= 1u<<(id&7);
+}
 
 /*
 =============
@@ -747,7 +776,7 @@ Can parse either fields or globals
 returns false if error
 =============
 */
-qboolean ED_ParseEpair (void *base, ddef_t *key, const char *s)
+qboolean ED_ParseEpair (void *base, ddef_t *key, const char *s, qboolean zoned)
 {
 	int		i;
 	char	string[128];
@@ -762,7 +791,10 @@ qboolean ED_ParseEpair (void *base, ddef_t *key, const char *s)
 	switch (key->type & ~DEF_SAVEGLOBAL)
 	{
 	case ev_string:
-		*(string_t *)d = ED_NewString(s);
+		if (zoned)	//zoned version allows us to change the strings more freely
+			ED_RezoneString((string_t *)d, s);
+		else
+			*(string_t *)d = ED_NewString(s);
 		break;
 
 	case ev_float:
@@ -960,7 +992,7 @@ const char *ED_ParseEdict (const char *data, edict_t *ent)
 			sprintf (com_token, "0 %s 0", temp);
 		}
 
-		if (!ED_ParseEpair ((void *)&ent->v, key, com_token))
+		if (!ED_ParseEpair ((void *)&ent->v, key, com_token, false))
 			Host_Error ("ED_ParseEdict: parse error");
 	}
 
@@ -1101,6 +1133,7 @@ void PR_ClearProgs(qcvm_t *vm)
 	if (qcvm->knownstrings)
 		Z_Free ((void *)qcvm->knownstrings);
 	free(qcvm->edicts); // ericw -- sv.edicts switched to use malloc()
+	free(qcvm->progs);	// spike -- pr_progs switched to use malloc (so menuqc doesn't end up stuck on the early hunk nor wiped on every map change)
 	memset(qcvm, 0, sizeof(*qcvm));
 
 	qcvm = NULL;
@@ -1112,14 +1145,14 @@ void PR_ClearProgs(qcvm_t *vm)
 PR_LoadProgs
 ===============
 */
-qboolean PR_LoadProgs (const char *filename, qboolean fatal, builtin_t *builtins, size_t numbuiltins)
+qboolean PR_LoadProgs (const char *filename, qboolean fatal, unsigned int needcrc, builtin_t *builtins, size_t numbuiltins)
 {
 	int			i;
 	unsigned int u;
 
 	PR_ClearProgs(qcvm);	//just in case.
 
-	qcvm->progs = (dprograms_t *)COM_LoadHunkFile (filename, NULL);
+	qcvm->progs = (dprograms_t *)COM_LoadMallocFile(filename, NULL);
 	if (!qcvm->progs)
 		return false;
 
@@ -1142,7 +1175,7 @@ qboolean PR_LoadProgs (const char *filename, qboolean fatal, builtin_t *builtins
 			return false;
 		}
 	}
-	if (qcvm->progs->crc != PROGHEADER_CRC)
+	if (qcvm->progs->crc != needcrc)
 	{
 		if (fatal)
 			Host_Error ("%s system vars have been modified, progdefs.h is out of date", filename);
